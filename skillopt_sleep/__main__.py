@@ -76,7 +76,8 @@ def _add_common(p: argparse.ArgumentParser) -> None:
     p.add_argument("--codex-home", default="", help="override ~/.codex for archived session harvest")
     p.add_argument("--source", default="", choices=["", "claude", "codex", "auto"],
                    help="session transcript source")
-    p.add_argument("--lookback-hours", type=int, default=0)
+    p.add_argument("--lookback-hours", type=int, default=None,
+                   help="harvest window in hours; 0 = scan full history")
     p.add_argument("--edit-budget", type=int, default=0)
     p.add_argument("--max-sessions", type=int, default=0,
                    help="cap harvested sessions before mining; default derives from max tasks")
@@ -111,10 +112,9 @@ def _cfg_from_args(args, task_meta: Dict[str, Any] | None = None) -> Any:
         overrides["codex_home"] = os.path.abspath(args.codex_home)
     if getattr(args, "source", ""):
         overrides["transcript_source"] = args.source
-    if getattr(args, "lookback_hours", None) is not None and args.lookback_hours != 0:
-        overrides["lookback_hours"] = args.lookback_hours
-    elif getattr(args, "lookback_hours", None) == 0:
-        overrides["lookback_hours"] = 0  # explicit opt-out: scan full history
+    lh = getattr(args, "lookback_hours", None)
+    if lh is not None:  # --lookback-hours was explicitly passed (0 = full history)
+        overrides["lookback_hours"] = lh
     if getattr(args, "edit_budget", 0):
         overrides["edit_budget"] = args.edit_budget
     if getattr(args, "max_sessions", 0):
