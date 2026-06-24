@@ -108,6 +108,10 @@ class SleepConfig:
         return os.path.join(self.data["codex_home"], "archived_sessions")
 
     @property
+    def codex_sessions_dir(self) -> str:
+        return os.path.join(self.data["codex_home"], "sessions")
+
+    @property
     def history_path(self) -> str:
         return os.path.join(self.data["claude_home"], "history.jsonl")
 

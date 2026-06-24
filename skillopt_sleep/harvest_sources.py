@@ -16,6 +16,7 @@ def harvest_for_config(cfg, *, since_iso: Optional[str] = None, limit: int = 0) 
     if source == "codex":
         return harvest_codex(
             cfg.codex_archived_sessions_dir,
+            sessions_dir=cfg.codex_sessions_dir,
             scope=scope,
             invoked_project=invoked_project,
             since_iso=since_iso,
@@ -24,6 +25,7 @@ def harvest_for_config(cfg, *, since_iso: Optional[str] = None, limit: int = 0) 
     if source == "auto":
         codex_digests = harvest_codex(
             cfg.codex_archived_sessions_dir,
+            sessions_dir=cfg.codex_sessions_dir,
             scope=scope,
             invoked_project=invoked_project,
             since_iso=since_iso,

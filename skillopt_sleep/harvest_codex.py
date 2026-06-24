@@ -1,6 +1,6 @@
 """SkillOpt-Sleep Codex Desktop session harvesting.
 
-Reads Codex Desktop archived session JSONL files and normalizes them into
+Reads Codex Desktop session JSONL files and normalizes them into
 ``SessionDigest`` records without copying developer/system instructions, tool
 arguments, or raw tool outputs.
 """
@@ -141,7 +141,7 @@ def _dedup(xs: Iterable[str]) -> List[str]:
 
 
 def digest_codex_archived_session(path: str, project: str = "") -> Optional[SessionDigest]:
-    """Build a ``SessionDigest`` from one Codex Desktop archived session."""
+    """Build a ``SessionDigest`` from one Codex Desktop session JSONL file."""
     session_id = os.path.splitext(os.path.basename(path))[0]
     started = ""
     ended = ""
@@ -218,28 +218,51 @@ def digest_codex_archived_session(path: str, project: str = "") -> Optional[Sess
     )
 
 
+def _codex_session_paths(
+    archived_sessions_dir: str,
+    sessions_dir: Optional[str] = None,
+) -> List[str]:
+    """Return newest-first Codex JSONL session paths from archive and live stores."""
+    paths: List[str] = []
+    if os.path.isdir(archived_sessions_dir):
+        paths.extend(
+            os.path.join(archived_sessions_dir, fn)
+            for fn in os.listdir(archived_sessions_dir)
+            if fn.endswith(".jsonl")
+        )
+    if sessions_dir and os.path.isdir(sessions_dir):
+        for root, _dirs, files in os.walk(sessions_dir):
+            paths.extend(
+                os.path.join(root, fn)
+                for fn in files
+                if fn.endswith(".jsonl")
+            )
+
+    paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
+    seen_session_ids = set()
+    unique: List[str] = []
+    for path in paths:
+        session_id = os.path.splitext(os.path.basename(path))[0]
+        if session_id in seen_session_ids:
+            continue
+        seen_session_ids.add(session_id)
+        unique.append(path)
+    return unique
+
+
 def harvest_codex(
     archived_sessions_dir: str,
     *,
+    sessions_dir: Optional[str] = None,
     scope: Any = "all",
     invoked_project: str = "",
     since_iso: Optional[str] = None,
     limit: int = 0,
 ) -> List[SessionDigest]:
-    """Walk ``~/.codex/archived_sessions`` and return matching digests."""
+    """Walk Codex archived and live session stores and return matching digests."""
     digests: List[SessionDigest] = []
-    if not os.path.isdir(archived_sessions_dir):
-        return digests
-
-    paths = [
-        os.path.join(archived_sessions_dir, fn)
-        for fn in os.listdir(archived_sessions_dir)
-        if fn.endswith(".jsonl")
-    ]
-    paths.sort(key=lambda p: os.path.getmtime(p), reverse=True)
-
     project_hint = invoked_project if scope == "invoked" else ""
-    for path in paths:
+    for path in _codex_session_paths(archived_sessions_dir, sessions_dir):
         digest = digest_codex_archived_session(path, project=project_hint)
         if digest is None:
             continue

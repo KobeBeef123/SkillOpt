@@ -181,6 +181,64 @@ class TestHarvest(unittest.TestCase):
         self.assertEqual(digests[0].session_id, "rollout-yoshi")
         self.assertEqual(digests[0].user_prompts, ["fix Yoshi"])
 
+    def test_harvest_codex_reads_live_sessions_tree_and_dedupes(self):
+        from skillopt_sleep.__main__ import _cfg_from_args
+        from skillopt_sleep.harvest_sources import harvest_for_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = os.path.join(tmp, ".codex")
+            archived = os.path.join(codex_home, "archived_sessions")
+            live = os.path.join(codex_home, "sessions", "2026", "06", "24")
+            os.makedirs(archived)
+            os.makedirs(live)
+
+            archived_shared = os.path.join(archived, "rollout-shared.jsonl")
+            live_shared = os.path.join(live, "rollout-shared.jsonl")
+            live_only = os.path.join(live, "rollout-live-only.jsonl")
+            self._write_jsonl(archived_shared, [
+                {"type": "turn_context", "timestamp": "2026-06-23T10:00:00Z",
+                 "payload": {"cwd": "/repo/Yoshi", "type": None}},
+                {"type": "response_item", "timestamp": "2026-06-23T10:00:01Z",
+                 "payload": {"type": "user_message", "message": "archived copy"}},
+            ])
+            self._write_jsonl(live_shared, [
+                {"type": "turn_context", "timestamp": "2026-06-24T10:00:00Z",
+                 "payload": {"cwd": "/repo/Yoshi", "type": None}},
+                {"type": "response_item", "timestamp": "2026-06-24T10:00:01Z",
+                 "payload": {"type": "user_message", "message": "live copy"}},
+            ])
+            self._write_jsonl(live_only, [
+                {"type": "turn_context", "timestamp": "2026-06-24T11:00:00Z",
+                 "payload": {"cwd": "/repo/Yoshi", "type": None}},
+                {"type": "response_item", "timestamp": "2026-06-24T11:00:01Z",
+                 "payload": {"type": "user_message", "message": "live only"}},
+            ])
+            os.utime(archived_shared, (1, 1))
+            os.utime(live_shared, (2, 2))
+            os.utime(live_only, (3, 3))
+
+            Args = type("Args", (), {
+                "project": "/repo/Yoshi",
+                "scope": "",
+                "backend": "",
+                "model": "",
+                "codex_path": "",
+                "claude_home": "",
+                "codex_home": codex_home,
+                "source": "codex",
+                "lookback_hours": 0,
+                "edit_budget": 0,
+                "auto_adopt": False,
+            })
+
+            cfg = _cfg_from_args(Args())
+            digests = harvest_for_config(cfg, limit=10)
+
+        self.assertEqual({d.session_id for d in digests}, {"rollout-shared", "rollout-live-only"})
+        prompts_by_id = {d.session_id: d.user_prompts for d in digests}
+        self.assertEqual(prompts_by_id["rollout-shared"], ["live copy"])
+        self.assertEqual(prompts_by_id["rollout-live-only"], ["live only"])
+
     def test_cli_exposes_limits_progress_and_target_skill_path(self):
         from skillopt_sleep.__main__ import _cfg_from_args
 
