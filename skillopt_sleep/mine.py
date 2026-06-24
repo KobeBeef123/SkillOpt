@@ -7,7 +7,8 @@ Two miners:
     re-asked after negative feedback => the early attempt failed), extracts
     the user's recurring intents, and labels outcomes from feedback signals.
   * llm_mine        — optional; uses an optimizer backend to produce richer
-    TaskRecords with checkable references. Falls back to heuristic on error.
+    TaskRecords with checkable references. Falls back to heuristic on error
+    only when explicitly allowed by the caller.
 
 The heuristic miner is what makes the whole cycle runnable offline and is the
 basis of the deterministic experiment.
@@ -18,9 +19,25 @@ import hashlib
 import os
 import re
 from collections import Counter
-from typing import Any, Callable, List, Optional, Set, Tuple
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 
 from skillopt_sleep.types import SessionDigest, TaskRecord
+
+CHECKABLE_REFERENCE_KINDS = {"rule", "rubric", "exact", "answer"}
+
+
+def is_checkable_task(task: TaskRecord) -> bool:
+    """Return whether a task carries a replay-checkable reference."""
+    return (task.reference_kind or "").lower() in CHECKABLE_REFERENCE_KINDS
+
+
+def count_checkable_tasks(tasks: List[TaskRecord], *, split: str = "") -> int:
+    """Count tasks with checkable references, optionally restricted by split."""
+    return sum(
+        1
+        for task in tasks
+        if is_checkable_task(task) and (not split or task.split == split)
+    )
 
 
 def _tid(project: str, intent: str) -> str:
@@ -291,22 +308,52 @@ def mine(
     holdout_fraction: float = 0.34,
     seed: int = 42,
     llm_miner: Optional[Callable[[List[SessionDigest]], List[TaskRecord]]] = None,
+    allow_heuristic_fallback: bool = True,
+    diagnostics: Optional[Dict[str, Any]] = None,
     target_skill_text: str = "",
     target_skill_path: str = "",
 ) -> List[TaskRecord]:
     """Top-level miner. Uses ``llm_miner`` if provided, else heuristic."""
     candidate_limit = candidate_limit or max_tasks
     tasks: List[TaskRecord] = []
+    if diagnostics is not None:
+        diagnostics.setdefault("llm_miner_attempted", llm_miner is not None)
+        diagnostics.setdefault("sessions_passed_to_miner", len(digests) if llm_miner else 0)
+        diagnostics.setdefault("llm_tasks_returned", 0)
+        diagnostics.setdefault("llm_miner_error", "")
+        diagnostics.setdefault("fallback_used", False)
     if llm_miner is not None:
+        if diagnostics is not None:
+            diagnostics["llm_miner_attempted"] = True
+            diagnostics["sessions_passed_to_miner"] = len(digests)
         try:
             tasks = llm_miner(digests) or []
-        except Exception:
+        except Exception as exc:
+            if diagnostics is not None:
+                diagnostics["llm_miner_error"] = f"{type(exc).__name__}: {exc}"
             tasks = []
+        if diagnostics is not None:
+            diagnostics["llm_tasks_returned"] = len(tasks)
     if not tasks:
-        tasks = heuristic_mine(digests, max_tasks=candidate_limit)
+        if llm_miner is not None and not allow_heuristic_fallback:
+            if diagnostics is not None:
+                diagnostics["miner_mode"] = "llm"
+                diagnostics["fallback_used"] = False
+            tasks = []
+        else:
+            tasks = heuristic_mine(digests, max_tasks=candidate_limit)
+            if diagnostics is not None:
+                diagnostics["miner_mode"] = "heuristic_fallback" if llm_miner else "heuristic"
+                diagnostics["fallback_used"] = llm_miner is not None
+    elif diagnostics is not None:
+        diagnostics["miner_mode"] = "llm" if llm_miner else "heuristic"
     tasks = dedup_tasks(tasks)
     if target_skill_text or target_skill_path:
         tasks = filter_tasks_for_target(tasks, target_skill_text, target_skill_path)
     tasks = tasks[:max_tasks]
     tasks = assign_splits(tasks, holdout_fraction=holdout_fraction, seed=seed)
+    if diagnostics is not None:
+        diagnostics["n_tasks_after_filter"] = len(tasks)
+        diagnostics["n_checkable_tasks"] = count_checkable_tasks(tasks)
+        diagnostics["n_checkable_val_tasks"] = count_checkable_tasks(tasks, split="val")
     return tasks

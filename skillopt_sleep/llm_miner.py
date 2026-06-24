@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import json
 import re
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from skillopt_sleep.backend import Backend, _extract_json
 from skillopt_sleep.types import SessionDigest, TaskRecord
@@ -110,25 +110,52 @@ def make_llm_miner(
     *,
     max_sessions: int = 20,
     max_tasks: int = 40,
+    diagnostics: Optional[Dict[str, Any]] = None,
 ) -> Callable[[List[SessionDigest]], List[TaskRecord]]:
     """Return an llm_miner(digests) -> list[TaskRecord] bound to a backend."""
 
     def _miner(digests: List[SessionDigest]) -> List[TaskRecord]:
         out: List[TaskRecord] = []
+        if diagnostics is not None:
+            diagnostics.setdefault("llm_parse_failures", 0)
+            diagnostics.setdefault("llm_empty_responses", 0)
+            diagnostics.setdefault("llm_backend_errors", 0)
+            diagnostics.setdefault("llm_sessions_processed", 0)
+            diagnostics["sessions_passed_to_miner"] = len(digests[:max_sessions])
         for d in digests[:max_sessions]:
             if not d.user_prompts:
                 continue
-            raw = backend._call(_digest_to_prompt(d), max_tokens=800)  # type: ignore[attr-defined]
+            if diagnostics is not None:
+                diagnostics["llm_sessions_processed"] += 1
+            try:
+                raw = backend._call(_digest_to_prompt(d), max_tokens=800)  # type: ignore[attr-defined]
+            except Exception as exc:
+                if diagnostics is not None:
+                    diagnostics["llm_backend_errors"] += 1
+                    diagnostics["llm_miner_error"] = f"{type(exc).__name__}: {exc}"
+                continue
+            if not str(raw or "").strip():
+                if diagnostics is not None:
+                    diagnostics["llm_empty_responses"] += 1
+                continue
             arr = _extract_json(raw, "array")
             if not isinstance(arr, list):
+                if diagnostics is not None:
+                    diagnostics["llm_parse_failures"] += 1
                 continue
+            if not arr and diagnostics is not None:
+                diagnostics["llm_empty_responses"] += 1
             for i, obj in enumerate(arr[:3]):
                 if isinstance(obj, dict):
                     t = _mk_task(d, obj, i)
                     if t is not None:
                         out.append(t)
                 if len(out) >= max_tasks:
+                    if diagnostics is not None:
+                        diagnostics["llm_tasks_returned"] = len(out)
                     return out
+        if diagnostics is not None:
+            diagnostics["llm_tasks_returned"] = len(out)
         return out
 
     return _miner

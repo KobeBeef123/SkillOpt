@@ -51,6 +51,9 @@ DEFAULTS: Dict[str, Any] = {
     "evolve_memory": True,        # consolidate CLAUDE.md
     "evolve_skill": True,         # consolidate the managed SKILL.md
     "llm_mine": True,             # use the backend to mine checkable tasks (real backends)
+    "allow_uncheckable_fallback": False,  # real backends must not silently use heuristic tasks
+    "min_checkable_tasks": 3,      # pre-gate floor before replay/consolidation
+    "min_checkable_val_tasks": 2,  # held-out signal floor before replay/consolidation
     "target_skill_path": "",      # explicit SKILL.md target for repo-scoped agents
     "target_task_filter": True,   # prefer mined tasks matching target_skill_path/text
     "progress": False,            # print phase progress to stderr

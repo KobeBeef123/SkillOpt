@@ -268,8 +268,8 @@ class TestHarvest(unittest.TestCase):
             self.assertEqual(cfg.get("max_tasks_per_night"), 3)
             self.assertTrue(cfg.get("progress"))
             self.assertEqual(
-                cfg.managed_skill_path(),
-                os.path.join(project, ".agents/skills/taste-skill/SKILL.md"),
+                os.path.normpath(cfg.managed_skill_path()),
+                os.path.normpath(os.path.join(project, ".agents/skills/taste-skill/SKILL.md")),
             )
 
     def test_cli_report_payload_includes_rejected_edits(self):
@@ -338,8 +338,8 @@ class TestHarvest(unittest.TestCase):
         })
 
         self.assertEqual(
-            cfg.managed_skill_path(),
-            "/repo/Yoshi/.agents/skills/yoshi-monorepo/SKILL.md",
+            os.path.normpath(cfg.managed_skill_path()),
+            os.path.normpath(os.path.abspath("/repo/Yoshi/.agents/skills/yoshi-monorepo/SKILL.md")),
         )
 
     def test_cmd_run_uses_tasks_file_without_harvest(self):
@@ -533,6 +533,20 @@ Resolve local Git conflicts.
             "configure an MCP server from docs",
             "resolve a local Git conflict",
         })
+
+    def test_mine_can_disable_llm_fallback(self):
+        diagnostics = {}
+        tasks = mine(
+            [self._digest(["configure the release workflow"], ["neg:missed"])],
+            llm_miner=lambda _digests: [],
+            allow_heuristic_fallback=False,
+            diagnostics=diagnostics,
+        )
+
+        self.assertEqual(tasks, [])
+        self.assertEqual(diagnostics["miner_mode"], "llm")
+        self.assertFalse(diagnostics["fallback_used"])
+        self.assertEqual(diagnostics["n_checkable_tasks"], 0)
 
 
 class TestConsolidateGate(unittest.TestCase):
@@ -874,13 +888,95 @@ class TestFullCycleAndAdopt(unittest.TestCase):
             manifest_path = os.path.join(outcome.staging_dir, "manifest.json")
             with open(manifest_path, encoding="utf-8") as f:
                 manifest = json.load(f)
-            self.assertEqual(manifest["live_skill_path"], target)
+            self.assertEqual(os.path.normpath(manifest["live_skill_path"]), os.path.normpath(target))
             self.assertFalse(os.path.exists(target))
 
             updated = adopt(outcome.staging_dir)
 
-            self.assertIn(target, updated)
+            self.assertIn(os.path.normpath(target), [os.path.normpath(p) for p in updated])
             self.assertTrue(os.path.exists(target))
+
+    def test_real_backend_skips_uncheckable_seed_tasks_before_replay(self):
+        from skillopt_sleep.backend import Backend
+
+        class StubBackend(Backend):
+            name = "codex"
+
+        with tempfile.TemporaryDirectory() as proj, tempfile.TemporaryDirectory() as home:
+            cfg = load_config(
+                invoked_project=proj,
+                projects="invoked",
+                backend="codex",
+                claude_home=os.path.join(home, ".claude"),
+                min_checkable_tasks=2,
+                min_checkable_val_tasks=1,
+            )
+            tasks = [
+                TaskRecord(id="t1", project=proj, intent="audit the repo", split="train"),
+                TaskRecord(id="t2", project=proj, intent="ship screenshots", split="val"),
+            ]
+
+            with mock.patch("skillopt_sleep.cycle.get_backend", return_value=StubBackend()):
+                outcome = run_sleep_cycle(cfg, seed_tasks=tasks, dry_run=True)
+
+        self.assertEqual(outcome.report.gate_action, "skip")
+        self.assertEqual(outcome.report.no_edits_reason, "no_checkable_validation_tasks")
+        self.assertEqual(outcome.report.n_replayed, 0)
+        self.assertEqual(outcome.report.n_checkable_tasks, 0)
+
+    def test_real_backend_stages_diagnostic_when_llm_miner_returns_empty(self):
+        from skillopt_sleep.backend import Backend
+
+        class EmptyMinerBackend(Backend):
+            name = "codex"
+
+            def _call(self, prompt, *, max_tokens=1024):
+                return "[]"
+
+        with tempfile.TemporaryDirectory() as proj, tempfile.TemporaryDirectory() as home:
+            codex_home = os.path.join(home, ".codex")
+            archived = os.path.join(codex_home, "archived_sessions")
+            os.makedirs(archived)
+            session_path = os.path.join(archived, "rollout-empty-miner.jsonl")
+            with open(session_path, "w", encoding="utf-8") as f:
+                for record in [
+                    {"type": "turn_context", "timestamp": "2026-06-24T10:00:00Z",
+                     "payload": {"cwd": proj, "type": None}},
+                    {"type": "response_item", "timestamp": "2026-06-24T10:00:01Z",
+                     "payload": {"type": "user_message",
+                                 "message": "please refactor the release workflow safely"}},
+                    {"type": "response_item", "timestamp": "2026-06-24T10:00:02Z",
+                     "payload": {"type": "agent_message", "message": "done"}},
+                ]:
+                    f.write(json.dumps(record) + "\n")
+            cfg = load_config(
+                invoked_project=proj,
+                projects="invoked",
+                backend="codex",
+                claude_home=os.path.join(home, ".claude"),
+                codex_home=codex_home,
+                transcript_source="codex",
+                lookback_hours=0,
+                max_sessions_per_night=5,
+                max_tasks_per_night=5,
+            )
+
+            with mock.patch("skillopt_sleep.cycle.get_backend", return_value=EmptyMinerBackend()):
+                outcome = run_sleep_cycle(cfg)
+
+            staging_exists = os.path.isdir(outcome.staging_dir)
+            report_md_path = os.path.join(outcome.staging_dir, "report.md")
+            with open(report_md_path, encoding="utf-8") as f:
+                report_md = f.read()
+
+        self.assertTrue(staging_exists)
+        self.assertEqual(outcome.report.gate_action, "skip")
+        self.assertEqual(outcome.report.no_edits_reason, "no_checkable_validation_tasks")
+        self.assertEqual(outcome.report.n_replayed, 0)
+        self.assertTrue(outcome.report.llm_miner_attempted)
+        self.assertFalse(outcome.report.fallback_used)
+        self.assertEqual(outcome.report.llm_tasks_returned, 0)
+        self.assertNotIn("held-out score", report_md)
 
 
 class TestCopilotBackend(unittest.TestCase):

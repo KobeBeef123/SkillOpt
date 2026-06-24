@@ -56,6 +56,18 @@ def _report_payload(rep, outcome) -> Dict[str, Any]:
         "candidate": rep.candidate_score,
         "n_tasks": rep.n_tasks,
         "n_sessions": rep.n_sessions,
+        "miner_mode": rep.miner_mode,
+        "llm_miner_attempted": rep.llm_miner_attempted,
+        "sessions_passed_to_miner": rep.sessions_passed_to_miner,
+        "llm_tasks_returned": rep.llm_tasks_returned,
+        "llm_parse_failures": rep.llm_parse_failures,
+        "llm_empty_responses": rep.llm_empty_responses,
+        "llm_backend_errors": rep.llm_backend_errors,
+        "llm_miner_error": rep.llm_miner_error,
+        "fallback_used": rep.fallback_used,
+        "n_checkable_tasks": rep.n_checkable_tasks,
+        "n_checkable_val_tasks": rep.n_checkable_val_tasks,
+        "pre_gate_status": rep.pre_gate_status,
         "n_accepted_edits": len(rep.edits),
         "n_rejected_edits": len(rep.rejected_edits),
         "edits": [e.__dict__ for e in rep.edits],
@@ -83,6 +95,12 @@ def _add_common(p: argparse.ArgumentParser) -> None:
                    help="cap harvested sessions before mining; default derives from max tasks")
     p.add_argument("--max-tasks", type=int, default=0,
                    help="cap mined tasks for this run")
+    p.add_argument("--allow-uncheckable-fallback", action="store_true",
+                   help="allow real backends to use heuristic reference_kind=none tasks")
+    p.add_argument("--min-checkable-tasks", type=int, default=0,
+                   help="minimum checkable tasks required before replay/consolidation")
+    p.add_argument("--min-checkable-val-tasks", type=int, default=0,
+                   help="minimum checkable validation tasks required before replay/consolidation")
     p.add_argument("--target-skill-path", default="",
                    help="explicit live SKILL.md path to evolve/stage/adopt")
     p.add_argument("--tasks-file", default="",
@@ -121,6 +139,12 @@ def _cfg_from_args(args, task_meta: Dict[str, Any] | None = None) -> Any:
         overrides["max_sessions_per_night"] = args.max_sessions
     if getattr(args, "max_tasks", 0):
         overrides["max_tasks_per_night"] = args.max_tasks
+    if getattr(args, "allow_uncheckable_fallback", False):
+        overrides["allow_uncheckable_fallback"] = True
+    if getattr(args, "min_checkable_tasks", 0):
+        overrides["min_checkable_tasks"] = args.min_checkable_tasks
+    if getattr(args, "min_checkable_val_tasks", 0):
+        overrides["min_checkable_val_tasks"] = args.min_checkable_val_tasks
     target_skill_path = getattr(args, "target_skill_path", "")
     if not target_skill_path and task_meta:
         target_skill_path = str(task_meta.get("target_skill_path") or "")
@@ -144,6 +168,8 @@ def cmd_run(args, dry: bool = False) -> int:
         tasks, task_meta = load_tasks_file(args.tasks_file)
     cfg = _cfg_from_args(args, task_meta=task_meta)
     if getattr(args, "tasks_file", ""):
+        cfg.data["task_source_mode"] = "tasks_file"
+    if getattr(args, "tasks_file", ""):
         tasks, task_meta = load_tasks_file(
             args.tasks_file,
             holdout_fraction=cfg.get("holdout_fraction", 0.34),
@@ -166,8 +192,11 @@ def cmd_run(args, dry: bool = False) -> int:
         print(json.dumps(payload, ensure_ascii=False, indent=2))
     else:
         print(f"[sleep] night {rep.night}: {rep.n_sessions} sessions -> {rep.n_tasks} tasks")
-        print(f"[sleep] held-out {rep.baseline_score:.3f} -> {rep.candidate_score:.3f} "
-              f"=> {rep.gate_action} (accepted={rep.accepted})")
+        if rep.n_replayed:
+            print(f"[sleep] held-out {rep.baseline_score:.3f} -> {rep.candidate_score:.3f} "
+                  f"=> {rep.gate_action} (accepted={rep.accepted})")
+        else:
+            print(f"[sleep] skipped before replay: {rep.no_edits_reason or rep.gate_action}")
         for e in rep.edits:
             print(f"   + [{e.target}/{e.op}] {e.content}")
         if rep.rejected_edits:
