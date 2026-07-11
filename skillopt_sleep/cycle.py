@@ -386,6 +386,7 @@ def run_sleep_cycle(
                 tasks,
                 holdout_fraction=cfg.get("holdout_fraction", 0.34),
                 seed=cfg.get("seed", 42),
+                min_val_tasks=int(cfg.get("min_checkable_val_tasks", 2) or 0),
             )
             miner_diagnostics["n_checkable_tasks"] = count_checkable_tasks(tasks)
             miner_diagnostics["n_checkable_val_tasks"] = count_checkable_tasks(

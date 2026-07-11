@@ -242,6 +242,7 @@ def assign_splits(
     test_fraction: float = 0.0,
     holdout_fraction: float | None = None,  # legacy alias for val_fraction
     seed: int = 42,
+    min_val_tasks: int = 0,
 ) -> List[TaskRecord]:
     """Deterministically split tasks into train / val / test.
 
@@ -270,8 +271,12 @@ def assign_splits(
 
     val_cut = int(round(val_fraction * 100))
     test_cut = val_cut + int(round(test_fraction * 100))
+    buckets = {
+        t.id: int(hashlib.sha256((str(seed) + t.id).encode()).hexdigest(), 16) % 100
+        for t in real
+    }
     for t in real:
-        bucket = int(hashlib.sha256((str(seed) + t.id).encode()).hexdigest(), 16) % 100
+        bucket = buckets[t.id]
         if bucket < val_cut:
             t.split = "val"
         elif bucket < test_cut:
@@ -279,10 +284,19 @@ def assign_splits(
         else:
             t.split = "train"
 
-    # guarantee val (the gate) is non-empty when we have >=2 real tasks
-    real_splits = {t.split for t in real}
-    if len(real) >= 2 and "val" not in real_splits:
-        real[-1].split = "val"
+    # Small hash samples can undershoot the validation floor forever because
+    # pending tasks retain their ids and therefore their buckets across nights.
+    # Promote the closest stable train buckets while preserving a train task.
+    required_val = max(int(min_val_tasks), 1 if len(real) >= 2 else 0)
+    required_val = min(required_val, max(0, len(real) - 1))
+    current_val = sum(t.split == "val" for t in real)
+    if current_val < required_val:
+        promotable = sorted(
+            (t for t in real if t.split == "train"),
+            key=lambda t: (buckets[t.id], t.id),
+        )
+        for t in promotable[: required_val - current_val]:
+            t.split = "val"
     # guarantee a train pool exists (dream or real) when possible
     if not any(t.split == "train" for t in tasks) and len(real) >= 2:
         real[0].split = "train"

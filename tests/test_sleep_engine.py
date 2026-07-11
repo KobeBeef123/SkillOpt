@@ -514,6 +514,22 @@ class TestMine(unittest.TestCase):
         again = assign_splits(researcher_persona(), val_fraction=0.34, seed=42)
         self.assertEqual([t.split for t in tasks], [t.split for t in again])
 
+    def test_split_honors_validation_floor_without_starving_train(self):
+        tasks = [
+            TaskRecord(id=f"floor-{i}", project="/p", intent=f"task {i}")
+            for i in range(8)
+        ]
+
+        assigned = assign_splits(
+            tasks,
+            val_fraction=0.0,
+            seed=42,
+            min_val_tasks=2,
+        )
+
+        self.assertEqual(sum(t.split == "val" for t in assigned), 2)
+        self.assertTrue(any(t.split == "train" for t in assigned))
+
     def test_dream_never_in_val_or_test(self):
         # the anti-overfitting guarantee: origin='dream' tasks only ever land in train
         real = researcher_persona()
