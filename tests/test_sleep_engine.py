@@ -710,6 +710,28 @@ class TestLlmMiner(unittest.TestCase):
                                user_prompts=["chat"], n_user_turns=1)
         self.assertEqual(make_llm_miner(EmptyBackend())([digest]), [])
 
+    def test_miner_surfaces_backend_launch_error_instead_of_empty_response(self):
+        from skillopt_sleep.backend import Backend
+        from skillopt_sleep.llm_miner import make_llm_miner
+
+        class FailedBackend(Backend):
+            name = "stub"
+            last_call_error = "codex exec failed: [WinError 5] Access is denied"
+
+            def _call(self, prompt, *, max_tokens=1024):
+                return ""
+
+        diagnostics = {}
+        digest = SessionDigest(session_id="s1", project="/p", user_prompts=["chat"])
+
+        tasks = make_llm_miner(FailedBackend(), diagnostics=diagnostics)([digest])
+
+        self.assertEqual(tasks, [])
+        self.assertEqual(diagnostics["llm_backend_errors"], 1)
+        self.assertEqual(diagnostics["llm_empty_responses"], 0)
+        self.assertIn("WinError 5", diagnostics["llm_miner_error"])
+        self.assertTrue(diagnostics["llm_miner_failed"])
+
     def test_miner_marks_uncheckable_model_candidates_for_retry(self):
         from skillopt_sleep.backend import Backend
         from skillopt_sleep.llm_miner import make_llm_miner
@@ -825,6 +847,22 @@ class TestMultiObjectiveAndPrefs(unittest.TestCase):
 
 
 class TestCodexBackend(unittest.TestCase):
+    def test_resolve_codex_path_prefers_runnable_windows_cmd(self):
+        from skillopt_sleep.backend import resolve_codex_path
+
+        def fake_which(command):
+            paths = {
+                "codex.cmd": r"C:\Users\me\AppData\Roaming\npm\codex.cmd",
+                "codex.exe": r"C:\Program Files\Codex\codex.exe",
+            }
+            return paths.get(command)
+
+        with mock.patch("skillopt_sleep.backend.os.name", "nt"), \
+             mock.patch("skillopt_sleep.backend.shutil.which", side_effect=fake_which):
+            resolved = resolve_codex_path()
+
+        self.assertEqual(resolved, r"C:\Users\me\AppData\Roaming\npm\codex.cmd")
+
     def test_codex_cli_backend_runs_exec_in_project_dir(self):
         from skillopt_sleep.backend import CodexCliBackend
 
@@ -855,6 +893,8 @@ class TestCodexBackend(unittest.TestCase):
             self.assertEqual(kwargs["cwd"], expected_project)
             self.assertIn("-C", cmd)
             self.assertEqual(cmd[cmd.index("-C") + 1], expected_project)
+            self.assertEqual(cmd[-1], "-")
+            self.assertEqual(kwargs["input"], "hello")
 
     def test_codex_call_retries_transient_failure_not_silent_zero(self):
         """A transient timeout must be RETRIED, not silently returned as "" — an

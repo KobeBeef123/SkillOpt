@@ -23,6 +23,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from typing import Any, Dict, List, Optional, Tuple
@@ -707,10 +708,10 @@ def resolve_codex_path(explicit: str = "") -> str:
     binary so replay output is clean.
     """
     if explicit:
-        return explicit
+        return shutil.which(explicit) or explicit
     env = os.environ.get("SKILLOPT_SLEEP_CODEX_PATH")
     if env:
-        return env
+        return shutil.which(env) or env
     candidates = [
         os.path.expanduser("~/.nvm/versions/node/v22.22.3/bin/codex"),
     ]
@@ -731,7 +732,14 @@ def resolve_codex_path(explicit: str = "") -> str:
         except Exception:
             pass
         return c
-    return "codex"  # last resort (may be the wrapper)
+    if os.name == "nt":
+        return (
+            shutil.which("codex.cmd")
+            or shutil.which("codex.exe")
+            or shutil.which("codex")
+            or "codex.exe"
+        )
+    return shutil.which("codex") or "codex"
 
 
 class CodexCliBackend(CliBackend):
@@ -772,12 +780,13 @@ class CodexCliBackend(CliBackend):
             cmd[3:3] = ["-C", self.project_dir]
         if self.model:
             cmd += ["-m", self.model]
-        cmd += ["--", prompt]
+        cmd += ["-"]
         proc = None
         try:
             try:
                 proc = subprocess.run(
                     cmd,
+                    input=prompt,
                     capture_output=True,
                     text=True,
                     timeout=self.timeout,
@@ -892,11 +901,18 @@ class CodexCliBackend(CliBackend):
             ]
             if self.model:
                 cmd += ["-m", self.model]
-            cmd += ["--", prompt]
+            cmd += ["-"]
             self.last_call_error = ""
             proc = None
             try:
-                proc = subprocess.run(cmd, capture_output=True, text=True, timeout=self.timeout, cwd=work)
+                proc = subprocess.run(
+                    cmd,
+                    input=prompt,
+                    capture_output=True,
+                    text=True,
+                    timeout=self.timeout,
+                    cwd=work,
+                )
             except subprocess.TimeoutExpired:
                 self.last_call_error = f"codex exec (tools) timed out after {self.timeout}s"
             except Exception as exc:  # noqa: BLE001

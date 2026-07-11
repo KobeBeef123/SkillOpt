@@ -164,6 +164,14 @@ def make_llm_miner(
                     diagnostics["llm_miner_failed"] = True
                 break
             if not str(raw or "").strip():
+                backend_error = str(getattr(backend, "last_call_error", "") or "")
+                if backend_error:
+                    from skillopt_sleep.staging import redact_secrets
+                    if diagnostics is not None:
+                        diagnostics["llm_backend_errors"] += 1
+                        diagnostics["llm_miner_error"] = redact_secrets(backend_error)[:500]
+                        diagnostics["llm_miner_failed"] = True
+                    break
                 if diagnostics is not None:
                     diagnostics["llm_empty_responses"] += 1
                 continue
