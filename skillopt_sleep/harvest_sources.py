@@ -11,11 +11,12 @@ from skillopt_sleep.types import SessionDigest
 def harvest_for_config(cfg, *, since_iso: Optional[str] = None, limit: int = 0) -> list[SessionDigest]:
     source = cfg.get("transcript_source", "claude")
     scope = cfg.get("projects", "invoked")
-    invoked_project = cfg.get("invoked_project", "")
+    invoked_project = cfg.get("scope_project") or cfg.get("invoked_project", "")
 
     if source == "codex":
         return harvest_codex(
             cfg.codex_archived_sessions_dir,
+            sessions_dir=cfg.codex_sessions_dir,
             scope=scope,
             invoked_project=invoked_project,
             since_iso=since_iso,
@@ -24,6 +25,7 @@ def harvest_for_config(cfg, *, since_iso: Optional[str] = None, limit: int = 0) 
     if source == "auto":
         codex_digests = harvest_codex(
             cfg.codex_archived_sessions_dir,
+            sessions_dir=cfg.codex_sessions_dir,
             scope=scope,
             invoked_project=invoked_project,
             since_iso=since_iso,

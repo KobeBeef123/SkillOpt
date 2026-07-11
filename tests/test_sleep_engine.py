@@ -33,6 +33,17 @@ class TestScoring(unittest.TestCase):
         self.assertGreater(keyword_soft_score("add login form", "please add the login form"), 0.5)
 
 
+class TestSleepState(unittest.TestCase):
+    def test_default_pending_state_is_not_shared_between_instances(self):
+        from skillopt_sleep.state import SleepState
+
+        first = SleepState("first.json")
+        second = SleepState("second.json")
+        first.set_pending_tasks("cursor", [{"id": "task"}])
+
+        self.assertEqual(second.pending_tasks_for("cursor"), [])
+
+
 class TestMemoryEdits(unittest.TestCase):
     def test_add_and_dedup(self):
         doc = set_learned("# skill\n", [])
@@ -181,6 +192,102 @@ class TestHarvest(unittest.TestCase):
         self.assertEqual(digests[0].session_id, "rollout-yoshi")
         self.assertEqual(digests[0].user_prompts, ["fix Yoshi"])
 
+    def test_scope_project_is_independent_from_output_project(self):
+        from skillopt_sleep.__main__ import _cfg_from_args
+        from skillopt_sleep.harvest_sources import harvest_for_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output_project = os.path.join(tmp, "state")
+            scope_project = os.path.join(tmp, "repo")
+            codex_home = os.path.join(tmp, ".codex")
+            archived = os.path.join(codex_home, "archived_sessions")
+            os.makedirs(archived)
+            self._write_jsonl(os.path.join(archived, "rollout-scope.jsonl"), [
+                {"type": "turn_context", "timestamp": "2026-07-01T10:00:00Z",
+                 "payload": {"cwd": scope_project, "type": None}},
+                {"type": "response_item", "timestamp": "2026-07-01T10:00:01Z",
+                 "payload": {"type": "user_message", "message": "fix scoped repo"}},
+            ])
+            Args = type("Args", (), {
+                "project": output_project,
+                "scope": "invoked",
+                "scope_project": scope_project,
+                "backend": "",
+                "model": "",
+                "codex_path": "",
+                "claude_home": "",
+                "codex_home": codex_home,
+                "source": "codex",
+                "lookback_hours": 0,
+                "edit_budget": 0,
+                "auto_adopt": False,
+            })
+
+            cfg = _cfg_from_args(Args())
+            digests = harvest_for_config(cfg, limit=10)
+
+        self.assertEqual(cfg.get("invoked_project"), os.path.abspath(output_project))
+        self.assertEqual(cfg.get("scope_project"), os.path.abspath(scope_project))
+        self.assertEqual([digest.session_id for digest in digests], ["rollout-scope"])
+
+    def test_harvest_codex_reads_live_sessions_tree_and_dedupes(self):
+        from skillopt_sleep.__main__ import _cfg_from_args
+        from skillopt_sleep.harvest_sources import harvest_for_config
+
+        with tempfile.TemporaryDirectory() as tmp:
+            codex_home = os.path.join(tmp, ".codex")
+            archived = os.path.join(codex_home, "archived_sessions")
+            live = os.path.join(codex_home, "sessions", "2026", "06", "24")
+            os.makedirs(archived)
+            os.makedirs(live)
+
+            archived_shared = os.path.join(archived, "rollout-shared.jsonl")
+            live_shared = os.path.join(live, "rollout-shared.jsonl")
+            live_only = os.path.join(live, "rollout-live-only.jsonl")
+            self._write_jsonl(archived_shared, [
+                {"type": "turn_context", "timestamp": "2026-06-23T10:00:00Z",
+                 "payload": {"cwd": "/repo/Yoshi", "type": None}},
+                {"type": "response_item", "timestamp": "2026-06-23T10:00:01Z",
+                 "payload": {"type": "user_message", "message": "archived copy"}},
+            ])
+            self._write_jsonl(live_shared, [
+                {"type": "turn_context", "timestamp": "2026-06-24T10:00:00Z",
+                 "payload": {"cwd": "/repo/Yoshi", "type": None}},
+                {"type": "response_item", "timestamp": "2026-06-24T10:00:01Z",
+                 "payload": {"type": "user_message", "message": "live copy"}},
+            ])
+            self._write_jsonl(live_only, [
+                {"type": "turn_context", "timestamp": "2026-06-24T11:00:00Z",
+                 "payload": {"cwd": "/repo/Yoshi", "type": None}},
+                {"type": "response_item", "timestamp": "2026-06-24T11:00:01Z",
+                 "payload": {"type": "user_message", "message": "live only"}},
+            ])
+            os.utime(archived_shared, (1, 1))
+            os.utime(live_shared, (2, 2))
+            os.utime(live_only, (3, 3))
+
+            Args = type("Args", (), {
+                "project": "/repo/Yoshi",
+                "scope": "",
+                "backend": "",
+                "model": "",
+                "codex_path": "",
+                "claude_home": "",
+                "codex_home": codex_home,
+                "source": "codex",
+                "lookback_hours": 0,
+                "edit_budget": 0,
+                "auto_adopt": False,
+            })
+
+            cfg = _cfg_from_args(Args())
+            digests = harvest_for_config(cfg, limit=10)
+
+        self.assertEqual({d.session_id for d in digests}, {"rollout-shared", "rollout-live-only"})
+        prompts_by_id = {d.session_id: d.user_prompts for d in digests}
+        self.assertEqual(prompts_by_id["rollout-shared"], ["live copy"])
+        self.assertEqual(prompts_by_id["rollout-live-only"], ["live only"])
+
     def test_cli_exposes_limits_progress_and_target_skill_path(self):
         from skillopt_sleep.__main__ import _cfg_from_args
 
@@ -210,8 +317,8 @@ class TestHarvest(unittest.TestCase):
             self.assertEqual(cfg.get("max_tasks_per_night"), 3)
             self.assertTrue(cfg.get("progress"))
             self.assertEqual(
-                cfg.managed_skill_path(),
-                os.path.join(project, ".agents/skills/taste-skill/SKILL.md"),
+                os.path.normpath(cfg.managed_skill_path()),
+                os.path.normpath(os.path.join(project, ".agents/skills/taste-skill/SKILL.md")),
             )
 
     def test_cli_report_payload_includes_rejected_edits(self):
@@ -280,8 +387,8 @@ class TestHarvest(unittest.TestCase):
         })
 
         self.assertEqual(
-            cfg.managed_skill_path(),
-            "/repo/Yoshi/.agents/skills/yoshi-monorepo/SKILL.md",
+            os.path.normpath(cfg.managed_skill_path()),
+            os.path.normpath(os.path.abspath("/repo/Yoshi/.agents/skills/yoshi-monorepo/SKILL.md")),
         )
 
     def test_cmd_run_uses_tasks_file_without_harvest(self):
@@ -476,6 +583,20 @@ Resolve local Git conflicts.
             "resolve a local Git conflict",
         })
 
+    def test_mine_can_disable_llm_fallback(self):
+        diagnostics = {}
+        tasks = mine(
+            [self._digest(["configure the release workflow"], ["neg:missed"])],
+            llm_miner=lambda _digests: [],
+            allow_heuristic_fallback=False,
+            diagnostics=diagnostics,
+        )
+
+        self.assertEqual(tasks, [])
+        self.assertEqual(diagnostics["miner_mode"], "llm")
+        self.assertFalse(diagnostics["fallback_used"])
+        self.assertEqual(diagnostics["n_checkable_tasks"], 0)
+
 
 class TestConsolidateGate(unittest.TestCase):
     def test_accepts_helpful_rejects_harmful(self):
@@ -588,6 +709,57 @@ class TestLlmMiner(unittest.TestCase):
         digest = SessionDigest(session_id="s1", project="/p",
                                user_prompts=["chat"], n_user_turns=1)
         self.assertEqual(make_llm_miner(EmptyBackend())([digest]), [])
+
+    def test_miner_marks_uncheckable_model_candidates_for_retry(self):
+        from skillopt_sleep.backend import Backend
+        from skillopt_sleep.llm_miner import make_llm_miner
+
+        class UncheckableBackend(Backend):
+            name = "stub"
+
+            def _call(self, prompt, *, max_tokens=1024):
+                return '[{"intent":"write a reusable release brief","checks":[]}]'
+
+        diagnostics = {}
+        digest = SessionDigest(
+            session_id="s1", project="/p", user_prompts=["write a release brief"]
+        )
+
+        tasks = make_llm_miner(UncheckableBackend(), diagnostics=diagnostics)([digest])
+
+        self.assertEqual(tasks, [])
+        self.assertEqual(diagnostics["llm_uncheckable_candidates"], 1)
+        self.assertTrue(diagnostics["llm_miner_failed"])
+
+    def test_miner_uses_one_cross_session_prompt_with_provenance(self):
+        from skillopt_sleep.backend import Backend
+        from skillopt_sleep.llm_miner import make_llm_miner
+
+        captured = {}
+
+        class CaptureBackend(Backend):
+            name = "stub"
+            def _call(self, prompt, *, max_tokens=1024):
+                captured["prompt"] = prompt
+                captured["calls"] = captured.get("calls", 0) + 1
+                return ('[{"intent":"keep Workboard status current",'
+                        '"source_session_ids":["s1","s2"],'
+                        '"checks":[{"op":"contains","arg":"status"}],'
+                        '"satisfied":false}]')
+
+        digests = [
+            SessionDigest(session_id="s1", project="/p",
+                          user_prompts=["fix the Workboard loop"], n_user_turns=1),
+            SessionDigest(session_id="s2", project="/p",
+                          user_prompts=["update Workboard status"], n_user_turns=1),
+        ]
+
+        tasks = make_llm_miner(CaptureBackend())(digests)
+
+        self.assertEqual(captured["calls"], 1)
+        self.assertIn("session_id: s1", captured["prompt"])
+        self.assertIn("session_id: s2", captured["prompt"])
+        self.assertEqual(tasks[0].source_sessions, ["s1", "s2"])
 
 
 class TestMultiObjectiveAndPrefs(unittest.TestCase):
@@ -883,6 +1055,17 @@ class TestToolLoop(unittest.TestCase):
 
 
 class TestFullCycleAndAdopt(unittest.TestCase):
+    @staticmethod
+    def _write_codex_session(path, project, session_id, ended_at):
+        with open(os.path.join(path, f"{session_id}.jsonl"), "w", encoding="utf-8") as f:
+            for record in [
+                {"type": "turn_context", "timestamp": ended_at,
+                 "payload": {"cwd": project, "type": None}},
+                {"type": "response_item", "timestamp": ended_at,
+                 "payload": {"type": "user_message", "message": "keep release checks explicit"}},
+            ]:
+                f.write(json.dumps(record) + "\n")
+
     def test_cycle_stage_then_adopt_with_backup(self):
         with tempfile.TemporaryDirectory() as proj, tempfile.TemporaryDirectory() as home:
             cfg = load_config(
@@ -929,13 +1112,186 @@ class TestFullCycleAndAdopt(unittest.TestCase):
             manifest_path = os.path.join(outcome.staging_dir, "manifest.json")
             with open(manifest_path, encoding="utf-8") as f:
                 manifest = json.load(f)
-            self.assertEqual(manifest["live_skill_path"], target)
+            self.assertEqual(os.path.normpath(manifest["live_skill_path"]), os.path.normpath(target))
             self.assertFalse(os.path.exists(target))
 
             updated = adopt(outcome.staging_dir)
 
-            self.assertIn(target, updated)
+            self.assertIn(os.path.normpath(target), [os.path.normpath(p) for p in updated])
             self.assertTrue(os.path.exists(target))
+
+    def test_real_backend_skips_uncheckable_seed_tasks_before_replay(self):
+        from skillopt_sleep.backend import Backend
+
+        class StubBackend(Backend):
+            name = "codex"
+
+        with tempfile.TemporaryDirectory() as proj, tempfile.TemporaryDirectory() as home:
+            cfg = load_config(
+                invoked_project=proj,
+                projects="invoked",
+                backend="codex",
+                claude_home=os.path.join(home, ".claude"),
+                min_checkable_tasks=2,
+                min_checkable_val_tasks=1,
+            )
+            tasks = [
+                TaskRecord(id="t1", project=proj, intent="audit the repo", split="train"),
+                TaskRecord(id="t2", project=proj, intent="ship screenshots", split="val"),
+            ]
+
+            with mock.patch("skillopt_sleep.cycle.get_backend", return_value=StubBackend()):
+                outcome = run_sleep_cycle(cfg, seed_tasks=tasks, dry_run=True)
+
+        self.assertEqual(outcome.report.gate_action, "skip")
+        self.assertEqual(outcome.report.no_edits_reason, "no_checkable_validation_tasks")
+        self.assertEqual(outcome.report.n_replayed, 0)
+        self.assertEqual(outcome.report.n_checkable_tasks, 0)
+
+    def test_real_backend_stages_diagnostic_when_llm_miner_returns_empty(self):
+        from skillopt_sleep.backend import Backend
+
+        class EmptyMinerBackend(Backend):
+            name = "codex"
+
+            def _call(self, prompt, *, max_tokens=1024):
+                return "[]"
+
+        with tempfile.TemporaryDirectory() as proj, tempfile.TemporaryDirectory() as home:
+            codex_home = os.path.join(home, ".codex")
+            archived = os.path.join(codex_home, "archived_sessions")
+            os.makedirs(archived)
+            session_path = os.path.join(archived, "rollout-empty-miner.jsonl")
+            with open(session_path, "w", encoding="utf-8") as f:
+                for record in [
+                    {"type": "turn_context", "timestamp": "2026-06-24T10:00:00Z",
+                     "payload": {"cwd": proj, "type": None}},
+                    {"type": "response_item", "timestamp": "2026-06-24T10:00:01Z",
+                     "payload": {"type": "user_message",
+                                 "message": "please refactor the release workflow safely"}},
+                    {"type": "response_item", "timestamp": "2026-06-24T10:00:02Z",
+                     "payload": {"type": "agent_message", "message": "done"}},
+                ]:
+                    f.write(json.dumps(record) + "\n")
+            cfg = load_config(
+                invoked_project=proj,
+                projects="invoked",
+                backend="codex",
+                claude_home=os.path.join(home, ".claude"),
+                codex_home=codex_home,
+                transcript_source="codex",
+                lookback_hours=0,
+                max_sessions_per_night=5,
+                max_tasks_per_night=5,
+            )
+
+            with mock.patch("skillopt_sleep.cycle.get_backend", return_value=EmptyMinerBackend()):
+                outcome = run_sleep_cycle(cfg)
+
+            staging_exists = os.path.isdir(outcome.staging_dir)
+            report_md_path = os.path.join(outcome.staging_dir, "report.md")
+            with open(report_md_path, encoding="utf-8") as f:
+                report_md = f.read()
+
+        self.assertTrue(staging_exists)
+        self.assertEqual(outcome.report.gate_action, "skip")
+        self.assertEqual(outcome.report.no_edits_reason, "no_checkable_validation_tasks")
+        self.assertEqual(outcome.report.n_replayed, 0)
+        self.assertTrue(outcome.report.llm_miner_attempted)
+        self.assertFalse(outcome.report.fallback_used)
+        self.assertEqual(outcome.report.llm_tasks_returned, 0)
+        self.assertTrue(outcome.report.harvest_cursor_advanced)
+        self.assertNotIn("held-out score", report_md)
+
+    def test_subthreshold_checkable_tasks_accumulate_across_nights(self):
+        from skillopt_sleep.backend import Backend
+
+        class OneTaskBackend(Backend):
+            name = "codex"
+
+            def _call(self, prompt, *, max_tokens=1024):
+                session_id = "rollout-two" if "rollout-two" in prompt else "rollout-one"
+                return json.dumps([{
+                    "intent": f"retain reusable rule from {session_id}",
+                    "source_session_ids": [session_id],
+                    "checks": [{"op": "contains", "arg": session_id}],
+                    "satisfied": False,
+                }])
+
+        with tempfile.TemporaryDirectory() as proj, tempfile.TemporaryDirectory() as home:
+            codex_home = os.path.join(home, ".codex")
+            archived = os.path.join(codex_home, "archived_sessions")
+            os.makedirs(archived)
+            self._write_codex_session(
+                archived, proj, "rollout-one", "2026-07-10T10:00:00"
+            )
+            cfg = load_config(
+                invoked_project=proj,
+                scope_project=proj,
+                projects="invoked",
+                backend="codex",
+                claude_home=os.path.join(home, ".claude"),
+                codex_home=codex_home,
+                transcript_source="codex",
+                lookback_hours=0,
+                max_sessions_per_night=5,
+                max_tasks_per_night=5,
+                min_checkable_tasks=3,
+                min_checkable_val_tasks=1,
+            )
+            with mock.patch("skillopt_sleep.cycle.get_backend", return_value=OneTaskBackend()):
+                first = run_sleep_cycle(cfg, clock=1_800_000_000)
+
+            self._write_codex_session(
+                archived, proj, "rollout-two", "2027-01-16T09:00:01"
+            )
+            with mock.patch("skillopt_sleep.cycle.get_backend", return_value=OneTaskBackend()):
+                second = run_sleep_cycle(cfg, clock=1_800_000_001)
+
+            with open(cfg.state_path, encoding="utf-8") as f:
+                state = json.load(f)
+            pending = [task for tasks in state["pending_tasks"].values() for task in tasks]
+
+        self.assertEqual(first.report.n_pending_tasks, 1)
+        self.assertEqual(second.report.n_pending_tasks, 2)
+        self.assertEqual(len(pending), 2)
+        self.assertTrue(first.report.harvest_cursor_advanced)
+        self.assertTrue(second.report.harvest_cursor_advanced)
+
+    def test_miner_failure_retains_harvest_cursor_for_retry(self):
+        from skillopt_sleep.backend import Backend
+
+        class InvalidJsonBackend(Backend):
+            name = "codex"
+
+            def _call(self, prompt, *, max_tokens=1024):
+                return "not-json"
+
+        with tempfile.TemporaryDirectory() as proj, tempfile.TemporaryDirectory() as home:
+            codex_home = os.path.join(home, ".codex")
+            archived = os.path.join(codex_home, "archived_sessions")
+            os.makedirs(archived)
+            self._write_codex_session(
+                archived, proj, "rollout-invalid", "2026-07-10T10:00:00"
+            )
+            cfg = load_config(
+                invoked_project=proj,
+                scope_project=proj,
+                projects="invoked",
+                backend="codex",
+                claude_home=os.path.join(home, ".claude"),
+                codex_home=codex_home,
+                transcript_source="codex",
+                lookback_hours=0,
+            )
+            with mock.patch("skillopt_sleep.cycle.get_backend", return_value=InvalidJsonBackend()):
+                outcome = run_sleep_cycle(cfg)
+            with open(cfg.state_path, encoding="utf-8") as f:
+                state = json.load(f)
+
+        self.assertEqual(outcome.report.llm_parse_failures, 2)
+        self.assertFalse(outcome.report.harvest_cursor_advanced)
+        self.assertEqual(state["last_harvest"], {})
 
 
 class TestCopilotBackend(unittest.TestCase):

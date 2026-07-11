@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import os
+from copy import deepcopy
 from typing import Any, Dict, List, Optional
 
 
@@ -29,13 +30,14 @@ DEFAULT_STATE: Dict[str, Any] = {
     "slow_memory": "",      # cross-night consolidated lessons (meta-skill analogue)
     "history": [],          # list of per-night summaries
     "task_archive": [],     # capped list of past mined tasks (for associative recall)
+    "pending_tasks": {},    # harvest cursor -> checkable tasks awaiting a safe gate-sized batch
 }
 
 
 class SleepState:
     def __init__(self, path: str, data: Optional[Dict[str, Any]] = None) -> None:
         self.path = path
-        self.data = data if data is not None else dict(DEFAULT_STATE)
+        self.data = data if data is not None else deepcopy(DEFAULT_STATE)
 
     # io ---------------------------------------------------------------------
     @classmethod
@@ -44,12 +46,12 @@ class SleepState:
             try:
                 with open(path) as f:
                     data = json.load(f)
-                merged = dict(DEFAULT_STATE)
+                merged = deepcopy(DEFAULT_STATE)
                 merged.update(data if isinstance(data, dict) else {})
                 return cls(path, merged)
             except Exception:
                 pass
-        return cls(path, dict(DEFAULT_STATE))
+        return cls(path, deepcopy(DEFAULT_STATE))
 
     def save(self) -> None:
         os.makedirs(os.path.dirname(self.path), exist_ok=True)
@@ -68,6 +70,16 @@ class SleepState:
 
     def set_last_harvest(self, project: str, iso_ts: str) -> None:
         self.data.setdefault("last_harvest", {})[project] = iso_ts
+
+    def pending_tasks_for(self, cursor: str) -> list:
+        return list(self.data.get("pending_tasks", {}).get(cursor, []))
+
+    def set_pending_tasks(self, cursor: str, task_dicts: list, cap: int = 100) -> None:
+        pending = self.data.setdefault("pending_tasks", {})
+        if task_dicts:
+            pending[cursor] = task_dicts[-cap:]
+        else:
+            pending.pop(cursor, None)
 
     @property
     def slow_memory(self) -> str:

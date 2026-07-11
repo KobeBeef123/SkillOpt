@@ -1,108 +1,129 @@
-"""SkillOpt-Sleep — LLM-backed task miner.
-
-The heuristic miner (mine.py) produces TaskRecords without a checkable
-reference, so real harvested transcripts can't show measurable lift. This
-module uses an optimizer backend to turn session digests into TaskRecords
-WITH a checkable rubric judge — the missing piece for real-data improvement.
-
-For each recurring intent it extracts:
-  * a clean, generalized `intent` (the reusable task, stripped of one-off specifics)
-  * a `rubric` (what a good answer must satisfy) -> stored as a rule judge of
-    `contains`/`regex`/`section_present` checks the local judge can score, OR a
-    free-text rubric scored by the backend's judge() when no programmatic check fits
-  * a preference signal (was the user satisfied?) to weight failures
-
-It is deliberately conservative: it only emits a task when it can name a
-concrete, checkable success criterion, so the gate has real signal. Tasks it
-can't make checkable are dropped (logged), not faked.
-"""
+"""LLM-backed mining of replay-checkable tasks from session batches."""
 from __future__ import annotations
 
-import json
+import hashlib
 import re
-from typing import Any, Callable, Dict, List
+from typing import Any, Callable, Dict, List, Optional
 
 from skillopt_sleep.backend import Backend, _extract_json
 from skillopt_sleep.types import SessionDigest, TaskRecord
 
 
-_MINER_PROMPT = """You are mining a user's past AI-assistant sessions to find RECURRING tasks
-worth optimizing a skill for. From the session below, extract 0-3 reusable tasks.
+_MINER_PROMPT = """You are mining a batch of past AI-assistant sessions for reusable tasks
+worth optimizing a skill for. Return at most __MAX_TASKS__ tasks across the batch.
 
-A good task is something the user asks for repeatedly or had to correct, where a
-GENERAL rule would help next time (formatting, structure, tool-use, conventions).
-Skip one-off or purely exploratory requests.
+Prefer tasks that recur across sessions, received user corrections, or contain explicit
+constraints that a general rule would help satisfy next time. A useful one-session task
+is allowed when it exposes a reusable correction or convention. Skip truly one-off or
+purely exploratory requests and anything that cannot be graded concretely.
 
 For each task return:
-  - "intent": the reusable request, generalized (no one-off specifics)
-  - "checks": a list of programmatic success checks a grader can run on a future
-     answer. Each check is one of:
-        {"op":"section_present","arg":"<heading text>"}
-        {"op":"regex","arg":"<python regex the answer must match>"}
-        {"op":"contains","arg":"<substring the answer must contain>"}
-        {"op":"max_chars","arg":<int>}
-     Only include checks you are confident a GOOD answer must satisfy.
-  - "rubric": a one-sentence description of what a good answer looks like
-  - "satisfied": true/false — did the user seem satisfied with the assistant's answer?
+  - "intent": a generalized reusable request with one-off details removed
+  - "source_session_ids": session IDs supporting the task
+  - "checks": programmatic checks, each using one supported operation:
+      {"op":"section_present","arg":"<heading>"}
+      {"op":"regex","arg":"<python regex>"}
+      {"op":"contains","arg":"<required substring>"}
+      {"op":"max_chars","arg":<positive integer>}
+      {"op":"min_chars","arg":<positive integer>}
+  - "rubric": one sentence describing success when exact checks are inappropriate
+  - "satisfied": whether the prior result appeared satisfactory
 
-Return ONLY a JSON array (possibly empty). No prose.
+Only include checks that every good future answer must satisfy. Return ONLY a JSON array,
+possibly empty, with no prose or markdown fences.
 
-# Session
-project: __PROJECT__
-user prompts:
-__PROMPTS__
-assistant final (last):
-__FINAL__
-feedback signals: __FEEDBACK__
+# Sessions
+__SESSIONS__
 """
 
+_PROMPT_CHAR_BUDGET = 48_000
 
-def _digest_to_prompt(d: SessionDigest) -> str:
-    prompts = "\n".join(f"  - {p[:240]}" for p in d.user_prompts[:6]) or "  (none)"
-    final = (d.assistant_finals[-1][:400] if d.assistant_finals else "(none)")
+
+def _digest_block(digest: SessionDigest, char_budget: int) -> str:
+    prompts = "\n".join(f"- {prompt}" for prompt in digest.user_prompts[:6]) or "- (none)"
+    final = digest.assistant_finals[-1] if digest.assistant_finals else "(none)"
+    block = (
+        f"## session_id: {digest.session_id}\n"
+        f"project: {digest.project or '(unknown)'}\n"
+        f"user prompts:\n{prompts}\n"
+        f"assistant final: {final}\n"
+        f"feedback: {', '.join(digest.feedback_signals[:6]) or '(none)'}"
+    )
+    return block[:char_budget]
+
+
+def _digests_to_prompt(digests: List[SessionDigest], max_tasks: int) -> str:
+    usable = [digest for digest in digests if digest.user_prompts]
+    per_session = max(240, min(1800, _PROMPT_CHAR_BUDGET // max(1, len(usable))))
+    sessions = "\n\n".join(
+        _digest_block(digest, per_session) for digest in usable
+    )[:_PROMPT_CHAR_BUDGET]
     return (
         _MINER_PROMPT
-        .replace("__PROJECT__", d.project or "(unknown)")
-        .replace("__PROMPTS__", prompts)
-        .replace("__FINAL__", final)
-        .replace("__FEEDBACK__", ", ".join(d.feedback_signals[:6]) or "(none)")
+        .replace("__MAX_TASKS__", str(max_tasks))
+        .replace("__SESSIONS__", sessions or "(none)")
     )
 
 
-def _mk_task(d: SessionDigest, obj: Dict[str, Any], idx: int) -> TaskRecord | None:
+def _clean_checks(checks: Any) -> List[Dict[str, Any]]:
+    cleaned: List[Dict[str, Any]] = []
+    for check in checks if isinstance(checks, list) else []:
+        if not isinstance(check, dict):
+            continue
+        op = check.get("op")
+        arg = check.get("arg")
+        if op in {"max_chars", "min_chars"}:
+            if isinstance(arg, int) and not isinstance(arg, bool) and arg > 0:
+                cleaned.append({"op": op, "arg": arg})
+            continue
+        if op not in {"section_present", "regex", "contains"}:
+            continue
+        if not isinstance(arg, str) or not arg.strip():
+            continue
+        if op == "regex":
+            try:
+                re.compile(arg)
+            except re.error:
+                continue
+        cleaned.append({"op": op, "arg": arg.strip()})
+    return cleaned
+
+
+def _mk_task(
+    digests_by_id: Dict[str, SessionDigest],
+    fallback: SessionDigest,
+    obj: Dict[str, Any],
+) -> TaskRecord | None:
     intent = str(obj.get("intent", "")).strip()
     if len(intent) < 8:
         return None
-    checks = obj.get("checks") or []
+    source_ids = [
+        str(session_id)
+        for session_id in (obj.get("source_session_ids") or [])
+        if str(session_id) in digests_by_id
+    ]
+    if not source_ids:
+        source_ids = [fallback.session_id]
+    source = digests_by_id.get(source_ids[0], fallback)
+    checks = _clean_checks(obj.get("checks"))
     rubric = str(obj.get("rubric", "")).strip()
-    satisfied = bool(obj.get("satisfied", False))
-
-    # keep only well-formed checks
-    clean_checks = []
-    for c in checks:
-        if isinstance(c, dict) and c.get("op") in {
-            "section_present", "regex", "contains", "max_chars", "min_chars",
-        }:
-            clean_checks.append({"op": c["op"], "arg": c.get("arg")})
-
-    import hashlib
-    tid = "llm_" + hashlib.sha256((d.project + intent).encode()).hexdigest()[:12]
-
-    if clean_checks:
+    common = {
+        "id": "llm_" + hashlib.sha256(intent.encode("utf-8")).hexdigest()[:12],
+        "project": source.project,
+        "intent": intent,
+        "outcome": "success" if bool(obj.get("satisfied", False)) else "fail",
+        "tags": ["mined:llm"],
+        "source_sessions": source_ids,
+    }
+    if checks:
         return TaskRecord(
-            id=tid, project=d.project, intent=intent,
-            reference_kind="rule", judge={"kind": "rule", "checks": clean_checks},
-            outcome="success" if satisfied else "fail",
-            tags=["mined:llm"], source_sessions=[d.session_id],
+            **common,
+            reference_kind="rule",
+            judge={"kind": "rule", "checks": checks},
         )
     if rubric:
-        return TaskRecord(
-            id=tid, project=d.project, intent=intent,
-            reference_kind="rubric", reference=rubric,
-            outcome="success" if satisfied else "fail",
-            tags=["mined:llm"], source_sessions=[d.session_id],
-        )
-    return None  # not checkable -> drop
+        return TaskRecord(**common, reference_kind="rubric", reference=rubric)
+    return None
 
 
 def make_llm_miner(
@@ -110,25 +131,67 @@ def make_llm_miner(
     *,
     max_sessions: int = 20,
     max_tasks: int = 40,
+    diagnostics: Optional[Dict[str, Any]] = None,
 ) -> Callable[[List[SessionDigest]], List[TaskRecord]]:
-    """Return an llm_miner(digests) -> list[TaskRecord] bound to a backend."""
+    """Return a miner that gives one bounded model call the full session batch."""
 
     def _miner(digests: List[SessionDigest]) -> List[TaskRecord]:
-        out: List[TaskRecord] = []
-        for d in digests[:max_sessions]:
-            if not d.user_prompts:
+        selected = [digest for digest in digests[:max_sessions] if digest.user_prompts]
+        if diagnostics is not None:
+            diagnostics.setdefault("llm_parse_failures", 0)
+            diagnostics.setdefault("llm_empty_responses", 0)
+            diagnostics.setdefault("llm_backend_errors", 0)
+            diagnostics.setdefault("llm_uncheckable_candidates", 0)
+            diagnostics["llm_miner_failed"] = False
+            diagnostics["sessions_passed_to_miner"] = len(selected)
+            diagnostics["llm_sessions_processed"] = len(selected)
+        if not selected:
+            return []
+
+        prompt = _digests_to_prompt(selected, max_tasks)
+        parsed = None
+        for attempt in range(2):
+            try:
+                suffix = "" if attempt == 0 else "\n\nRetry: return only a valid JSON array."
+                raw = backend._call(  # type: ignore[attr-defined]
+                    prompt + suffix,
+                    max_tokens=max(800, min(4096, max_tasks * 300)),
+                )
+            except Exception as exc:
+                if diagnostics is not None:
+                    diagnostics["llm_backend_errors"] += 1
+                    diagnostics["llm_miner_error"] = f"{type(exc).__name__}: {exc}"
+                    diagnostics["llm_miner_failed"] = True
+                break
+            if not str(raw or "").strip():
+                if diagnostics is not None:
+                    diagnostics["llm_empty_responses"] += 1
                 continue
-            raw = backend._call(_digest_to_prompt(d), max_tokens=800)  # type: ignore[attr-defined]
-            arr = _extract_json(raw, "array")
-            if not isinstance(arr, list):
-                continue
-            for i, obj in enumerate(arr[:3]):
-                if isinstance(obj, dict):
-                    t = _mk_task(d, obj, i)
-                    if t is not None:
-                        out.append(t)
-                if len(out) >= max_tasks:
-                    return out
-        return out
+            parsed = _extract_json(raw, "array")
+            if isinstance(parsed, list):
+                break
+            if diagnostics is not None:
+                diagnostics["llm_parse_failures"] += 1
+
+        if not isinstance(parsed, list):
+            if diagnostics is not None:
+                diagnostics["llm_miner_failed"] = True
+            return []
+        if not parsed and diagnostics is not None:
+            diagnostics["llm_empty_responses"] += 1
+
+        by_id = {digest.session_id: digest for digest in selected}
+        tasks: List[TaskRecord] = []
+        for obj in parsed[:max_tasks]:
+            task = _mk_task(by_id, selected[0], obj) if isinstance(obj, dict) else None
+            if task is not None:
+                tasks.append(task)
+            elif diagnostics is not None:
+                diagnostics["llm_uncheckable_candidates"] += 1
+        if diagnostics is not None:
+            diagnostics["llm_tasks_returned"] = len(tasks)
+            if parsed and not tasks:
+                diagnostics["llm_miner_failed"] = True
+        return tasks
 
     return _miner
