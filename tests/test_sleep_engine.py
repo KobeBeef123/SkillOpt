@@ -889,6 +889,7 @@ class TestCodexBackend(unittest.TestCase):
                 model="gpt-5.6-sol",
                 codex_path="codex",
                 reasoning_effort="xhigh",
+                timeout=900,
                 project_dir=project,
             )
 
@@ -902,6 +903,7 @@ class TestCodexBackend(unittest.TestCase):
             self.assertEqual(cmd[cmd.index("-C") + 1], expected_project)
             self.assertIn("gpt-5.6-sol", cmd)
             self.assertIn('model_reasoning_effort="xhigh"', cmd)
+            self.assertEqual(backend.timeout, 900)
             self.assertEqual(cmd[-1], "-")
             self.assertEqual(kwargs["input"], "hello")
             self.assertEqual(kwargs["encoding"], "utf-8")

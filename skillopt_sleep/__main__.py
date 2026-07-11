@@ -94,6 +94,12 @@ def _add_common(p: argparse.ArgumentParser) -> None:
         choices=["", "minimal", "low", "medium", "high", "xhigh"],
         help="Codex model reasoning effort",
     )
+    p.add_argument(
+        "--codex-timeout-seconds",
+        type=int,
+        default=0,
+        help="per-call Codex timeout; 0 uses the configured default",
+    )
     p.add_argument("--codex-path", default="", help="path to the real @openai/codex binary")
     p.add_argument("--claude-home", default="", help="override ~/.claude (also isolates state)")
     p.add_argument("--codex-home", default="", help="override ~/.codex for archived session harvest")
@@ -137,6 +143,8 @@ def _cfg_from_args(args, task_meta: Dict[str, Any] | None = None) -> Any:
         overrides["model"] = args.model
     if getattr(args, "reasoning_effort", ""):
         overrides["reasoning_effort"] = args.reasoning_effort
+    if getattr(args, "codex_timeout_seconds", 0) > 0:
+        overrides["codex_timeout_seconds"] = args.codex_timeout_seconds
     if getattr(args, "codex_path", ""):
         overrides["codex_path"] = os.path.abspath(args.codex_path)
     if getattr(args, "claude_home", ""):

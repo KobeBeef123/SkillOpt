@@ -1412,6 +1412,7 @@ def get_backend(
     *,
     model: str = "",
     reasoning_effort: str = "",
+    timeout: int = 240,
     claude_path: str = "claude",
     codex_path: str = "",
     azure_endpoint: str = "",
@@ -1425,6 +1426,7 @@ def get_backend(
             model=model,
             codex_path=codex_path,
             reasoning_effort=reasoning_effort,
+            timeout=timeout,
             project_dir=project_dir,
         )
     if n in {"azure", "azure_openai", "aoai"}:

@@ -264,6 +264,7 @@ def run_sleep_cycle(
         backend_name,
         model=cfg.get("model", ""),
         reasoning_effort=cfg.get("reasoning_effort", ""),
+        timeout=int(cfg.get("codex_timeout_seconds", 240)),
         codex_path=cfg.get("codex_path", ""),
         project_dir=project,
     )

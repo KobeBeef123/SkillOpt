@@ -40,6 +40,7 @@ DEFAULTS: Dict[str, Any] = {
     "backend": "mock",            # "mock" | "claude" | "codex" | "copilot"
     "model": "",                  # backend-specific; "" => backend default
     "reasoning_effort": "",       # Codex model reasoning effort; e.g. xhigh
+    "codex_timeout_seconds": 240,  # per-call timeout; raise for xhigh models
     "gate_mode": "on",            # "on" (validation-gated) | "off" (greedy, no hard filter)
     "codex_path": "",             # "" => auto-detect the real @openai/codex binary
     "edit_budget": 4,             # textual learning rate (max edits/night)
