@@ -39,6 +39,7 @@ DEFAULTS: Dict[str, Any] = {
     # ── optimizer ──────────────────────────────────────────────────────────
     "backend": "mock",            # "mock" | "claude" | "codex" | "copilot"
     "model": "",                  # backend-specific; "" => backend default
+    "reasoning_effort": "",       # Codex model reasoning effort; e.g. xhigh
     "gate_mode": "on",            # "on" (validation-gated) | "off" (greedy, no hard filter)
     "codex_path": "",             # "" => auto-detect the real @openai/codex binary
     "edit_budget": 4,             # textual learning rate (max edits/night)

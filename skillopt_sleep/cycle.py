@@ -263,6 +263,7 @@ def run_sleep_cycle(
     backend = get_backend(
         backend_name,
         model=cfg.get("model", ""),
+        reasoning_effort=cfg.get("reasoning_effort", ""),
         codex_path=cfg.get("codex_path", ""),
         project_dir=project,
     )

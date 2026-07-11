@@ -88,6 +88,12 @@ def _add_common(p: argparse.ArgumentParser) -> None:
                    help="working-directory root matched by --scope invoked; defaults to --project")
     p.add_argument("--backend", default="", choices=["", "mock", "claude", "codex", "copilot"])
     p.add_argument("--model", default="")
+    p.add_argument(
+        "--reasoning-effort",
+        default="",
+        choices=["", "minimal", "low", "medium", "high", "xhigh"],
+        help="Codex model reasoning effort",
+    )
     p.add_argument("--codex-path", default="", help="path to the real @openai/codex binary")
     p.add_argument("--claude-home", default="", help="override ~/.claude (also isolates state)")
     p.add_argument("--codex-home", default="", help="override ~/.codex for archived session harvest")
@@ -129,6 +135,8 @@ def _cfg_from_args(args, task_meta: Dict[str, Any] | None = None) -> Any:
         overrides["backend"] = args.backend
     if args.model:
         overrides["model"] = args.model
+    if getattr(args, "reasoning_effort", ""):
+        overrides["reasoning_effort"] = args.reasoning_effort
     if getattr(args, "codex_path", ""):
         overrides["codex_path"] = os.path.abspath(args.codex_path)
     if getattr(args, "claude_home", ""):

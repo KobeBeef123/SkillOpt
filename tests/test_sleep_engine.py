@@ -847,7 +847,7 @@ class TestMultiObjectiveAndPrefs(unittest.TestCase):
 
 
 class TestCodexBackend(unittest.TestCase):
-    def test_resolve_codex_path_prefers_runnable_windows_cmd(self):
+    def test_resolve_codex_path_prefers_npm_native_windows_binary(self):
         from skillopt_sleep.backend import resolve_codex_path
 
         def fake_which(command):
@@ -857,11 +857,13 @@ class TestCodexBackend(unittest.TestCase):
             }
             return paths.get(command)
 
+        native = r"C:\Users\me\AppData\Roaming\npm\node_modules\@openai\codex-win32-x64\vendor\x86_64-pc-windows-msvc\bin\codex.exe"
         with mock.patch("skillopt_sleep.backend.os.name", "nt"), \
-             mock.patch("skillopt_sleep.backend.shutil.which", side_effect=fake_which):
+             mock.patch("skillopt_sleep.backend.shutil.which", side_effect=fake_which), \
+             mock.patch("skillopt_sleep.backend.glob.glob", return_value=[native]):
             resolved = resolve_codex_path()
 
-        self.assertEqual(resolved, r"C:\Users\me\AppData\Roaming\npm\codex.cmd")
+        self.assertEqual(resolved, native)
 
     def test_codex_cli_backend_runs_exec_in_project_dir(self):
         from skillopt_sleep.backend import CodexCliBackend
@@ -883,7 +885,12 @@ class TestCodexBackend(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as project:
             expected_project = os.path.abspath(project)
-            backend = CodexCliBackend(codex_path="codex", project_dir=project)
+            backend = CodexCliBackend(
+                model="gpt-5.6-sol",
+                codex_path="codex",
+                reasoning_effort="xhigh",
+                project_dir=project,
+            )
 
             with mock.patch("skillopt_sleep.backend.subprocess.run", side_effect=fake_run):
                 self.assertEqual(backend._call("hello"), "ok")
@@ -893,6 +900,8 @@ class TestCodexBackend(unittest.TestCase):
             self.assertEqual(kwargs["cwd"], expected_project)
             self.assertIn("-C", cmd)
             self.assertEqual(cmd[cmd.index("-C") + 1], expected_project)
+            self.assertIn("gpt-5.6-sol", cmd)
+            self.assertIn('model_reasoning_effort="xhigh"', cmd)
             self.assertEqual(cmd[-1], "-")
             self.assertEqual(kwargs["input"], "hello")
             self.assertEqual(kwargs["encoding"], "utf-8")

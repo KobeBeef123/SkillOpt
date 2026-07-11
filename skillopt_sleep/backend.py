@@ -20,6 +20,7 @@ consolidation stage gates and stages.
 """
 from __future__ import annotations
 
+import glob
 import json
 import os
 import re
@@ -700,6 +701,17 @@ class ClaudeCliBackend(CliBackend):
             except Exception:
                 pass
 
+def _prefer_windows_native_codex(path: str) -> str:
+    if os.name != "nt" or not path.lower().endswith((".cmd", ".bat")):
+        return path
+    pattern = os.path.join(
+        os.path.dirname(path),
+        "node_modules", "@openai", "codex-win32-*", "vendor", "*", "bin", "codex.exe",
+    )
+    native = sorted(glob.glob(pattern))
+    return native[0] if native else path
+
+
 def resolve_codex_path(explicit: str = "") -> str:
     """Find the REAL `@openai/codex` binary, skipping the hermes wrapper.
 
@@ -708,10 +720,10 @@ def resolve_codex_path(explicit: str = "") -> str:
     binary so replay output is clean.
     """
     if explicit:
-        return shutil.which(explicit) or explicit
+        return _prefer_windows_native_codex(shutil.which(explicit) or explicit)
     env = os.environ.get("SKILLOPT_SLEEP_CODEX_PATH")
     if env:
-        return shutil.which(env) or env
+        return _prefer_windows_native_codex(shutil.which(env) or env)
     candidates = [
         os.path.expanduser("~/.nvm/versions/node/v22.22.3/bin/codex"),
     ]
@@ -733,12 +745,10 @@ def resolve_codex_path(explicit: str = "") -> str:
             pass
         return c
     if os.name == "nt":
-        return (
-            shutil.which("codex.cmd")
-            or shutil.which("codex.exe")
-            or shutil.which("codex")
-            or "codex.exe"
+        resolved = (
+            shutil.which("codex.cmd") or shutil.which("codex.exe") or shutil.which("codex")
         )
+        return _prefer_windows_native_codex(resolved) if resolved else "codex.exe"
     return shutil.which("codex") or "codex"
 
 
@@ -751,6 +761,7 @@ class CodexCliBackend(CliBackend):
         self,
         model: str = "",
         codex_path: str = "",
+        reasoning_effort: str = "",
         timeout: int = 240,
         sandbox: str = "read-only",
         project_dir: str = "",
@@ -758,6 +769,9 @@ class CodexCliBackend(CliBackend):
         super().__init__(model=model or os.environ.get("SKILLOPT_SLEEP_CODEX_MODEL", ""),
                          timeout=timeout)
         self.codex_path = resolve_codex_path(codex_path)
+        self.reasoning_effort = (
+            reasoning_effort or os.environ.get("SKILLOPT_SLEEP_CODEX_REASONING_EFFORT", "")
+        ).strip()
         self.sandbox = sandbox
         self.project_dir = (
             os.path.abspath(os.path.expanduser(project_dir)) if project_dir else ""
@@ -780,6 +794,8 @@ class CodexCliBackend(CliBackend):
             cmd[3:3] = ["-C", self.project_dir]
         if self.model:
             cmd += ["-m", self.model]
+        if self.reasoning_effort:
+            cmd += ["-c", f'model_reasoning_effort="{self.reasoning_effort}"']
         cmd += ["-"]
         proc = None
         try:
@@ -903,6 +919,8 @@ class CodexCliBackend(CliBackend):
             ]
             if self.model:
                 cmd += ["-m", self.model]
+            if self.reasoning_effort:
+                cmd += ["-c", f'model_reasoning_effort="{self.reasoning_effort}"']
             cmd += ["-"]
             self.last_call_error = ""
             proc = None
@@ -1393,6 +1411,7 @@ def get_backend(
     name: str,
     *,
     model: str = "",
+    reasoning_effort: str = "",
     claude_path: str = "claude",
     codex_path: str = "",
     azure_endpoint: str = "",
@@ -1402,7 +1421,12 @@ def get_backend(
     if n in {"claude", "anthropic", "claude_cli", "claude_code"}:
         return ClaudeCliBackend(model=model, claude_path=claude_path)
     if n in {"codex", "codex_cli", "openai_codex"}:
-        return CodexCliBackend(model=model, codex_path=codex_path, project_dir=project_dir)
+        return CodexCliBackend(
+            model=model,
+            codex_path=codex_path,
+            reasoning_effort=reasoning_effort,
+            project_dir=project_dir,
+        )
     if n in {"azure", "azure_openai", "aoai"}:
         return AzureOpenAIBackend(deployment=model, endpoint=azure_endpoint)
     if n in {"azure-responses", "azure_responses", "aoai-responses", "responses"}:
