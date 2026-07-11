@@ -895,6 +895,7 @@ class TestCodexBackend(unittest.TestCase):
             self.assertEqual(cmd[cmd.index("-C") + 1], expected_project)
             self.assertEqual(cmd[-1], "-")
             self.assertEqual(kwargs["input"], "hello")
+            self.assertEqual(kwargs["encoding"], "utf-8")
 
     def test_codex_call_retries_transient_failure_not_silent_zero(self):
         """A transient timeout must be RETRIED, not silently returned as "" — an

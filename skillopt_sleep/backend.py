@@ -789,6 +789,8 @@ class CodexCliBackend(CliBackend):
                     input=prompt,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=self.timeout,
                     cwd=self.project_dir or None,
                 )
@@ -910,6 +912,8 @@ class CodexCliBackend(CliBackend):
                     input=prompt,
                     capture_output=True,
                     text=True,
+                    encoding="utf-8",
+                    errors="replace",
                     timeout=self.timeout,
                     cwd=work,
                 )
